@@ -118,6 +118,11 @@ type WriterConfig struct {
 	// whether the messages were written to kafka.
 	Async bool
 
+	// An optional function called when the writer succeeds or fails the
+	// delivery of messages to a kafka partition. When writing the messages
+	// fails, the `err` parameter will be non-nil.
+	Completion func(messages []Message, err error)
+
 	// CompressionCodec set the codec to be used to compress Kafka messages.
 	// Note that messages are allowed to overwrite the compression codec individually.
 	CompressionCodec
@@ -303,10 +308,7 @@ func (w *Writer) WriteMessages(ctx context.Context, msgs ...Message) error {
 	}
 
 	var err error
-	var res chan error
-	if !w.config.Async {
-		res = make(chan error, len(msgs))
-	}
+	var res = make(chan error, len(msgs))
 	t0 := time.Now()
 	defer w.stats.writeTime.observeDuration(time.Since(t0))
 
@@ -337,7 +339,20 @@ func (w *Writer) WriteMessages(ctx context.Context, msgs ...Message) error {
 		}
 	}
 
-	if w.config.Async {
+	if w.config.Async && w.config.Completion == nil {
+		return nil
+	} else if w.config.Async && w.config.Completion != nil {
+		go func() {
+			for i := 0; i != len(msgs); i++ {
+				select {
+				case e := <-res:
+					if e != nil {
+						err = e
+					}
+				}
+			}
+			w.config.Completion(msgs, err)
+		}()
 		return nil
 	}
 
